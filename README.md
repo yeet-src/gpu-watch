@@ -13,36 +13,9 @@
 
 ![gpu-watch on yeet: an RTX 5070 going from idle to a model under load, with clocks against their ceilings, throttle reasons, P-state, PCIe link and power against its limits](docs/dashboard.png)
 
-Everything a host's NVIDIA GPUs will tell you, from one service, on
-whichever interface you are holding: `curl`, Prometheus, a terminal,
-or an agent. The device view is NVML's, with the parts `nvidia-smi`
-shows and the parts it does not chart: each clock against its ceiling,
-*why* the clocks are held down, the P-state, the PCIe link as
-negotiated, power against its enforced limit, ECC. Under that, a scoped
-set of kprobes on the driver's entry points answers the question NVML
-cannot: which process is talking to the GPU, how often, and how long
-each call takes.
-
-```
-$ curl -s 'localhost:9480/gpu?fields=device,thermal,clocks&format=table'
-GPU 0  NVIDIA GeForce RTX 5070
-  uuid           GPU-88379e65-7706-b4fb-5e78-ae338fd37ab0
-  state          P1, 59 C
-  clocks         graphics 2842/3120 MHz, sm 2842/3120 MHz, memory 13801/14001 MHz, video 2377/3090 MHz
-  throttle       none
-  fans           40%, 41%, 40%
-
-$ curl -s 'localhost:9480/gpu?fields=driver' | jq -r '.driver.by_process_name[] | "\(.comm)\t\(.rm_ioctls) rm ioctls\t\(.uvm_ioctls) uvm ioctls"'
-tokio-runtime-w 22457 rm ioctls     0 uvm ioctls
-ollama            567 rm ioctls   270 uvm ioctls
-nvidia-smi         52 rm ioctls     4 uvm ioctls
-```
-
-That is a model serving under Ollama. The `tokio-runtime-w` row is
-yeet's own daemon: its NVML reads are ioctls too, and the probe does
-not exempt itself.
-
 ## Getting started
+
+On the GPU host, with the NVIDIA driver loaded:
 
 ```sh
 curl -fsSL https://yeet.cx | sh
@@ -55,31 +28,74 @@ cd gpu-watch
 make up
 ```
 
-Then, in order of how fast each pays off:
+That builds the probe and starts the service on `:9480`. The compiler
+comes from yeet's vendored static toolchain, fetched once into
+`~/.cache/yeet`, so nothing else needs installing.
 
 ```sh
-make snapshot                                            # the table above, every section
-curl -s 'localhost:9480/gpu?fields=power,thermal' | jq   # the same as JSON, two sections
-make top                                                 # nvidia-smi that updates in place; ctrl-c to leave
-curl -sN 'localhost:9480/gpu?watch=1s&fields=utilization,clocks'   # a line of JSON per second
-make scrape                                              # Prometheus
+make snapshot    # every section, as a table
+make top         # nvidia-smi that updates in place; ctrl-c to leave
+make down        # stop and remove the service
 ```
+
+Or skip the clone: each release carries `gpu-watch.tar.gz`, the built
+probe included, and `yeet service import` takes a URL:
 
 ```sh
-make down       # stop and remove the service
-make status     # the service tree
+yeet service import https://github.com/yeet-src/gpu-watch/releases/latest/download/gpu-watch.tar.gz --now
 ```
 
-`make up` builds the probe the first time. The compiler comes from
-yeet's vendored static toolchain, fetched once into `~/.cache/yeet`, so
-nothing else needs installing. The NVIDIA driver has to be loaded; if
-it is not, every device section reads `available: false` and the
-kernel sections still work.
+## Usage
 
-### Point an agent at it
+Everything a host's NVIDIA GPUs will tell you, from one service, on
+whichever interface you are holding. The device view is NVML's, with
+the parts `nvidia-smi` shows and the parts it does not chart: each
+clock against its ceiling, *why* the clocks are held down, the
+P-state, the PCIe link as negotiated, power against its enforced
+limit, ECC. Under that, a scoped set of kprobes on the driver's entry
+points answers the question NVML cannot: which process is talking to
+the GPU, how often, and how long each call takes.
 
-The service is also a Model Context Protocol server, and `yeet dial`
-is the whole client. For Claude Code:
+**Ask for a section, get a table.** A section is a word; every
+interface takes a comma list and defaults to all of them.
+
+```
+$ curl -s 'localhost:9480/gpu?fields=device,thermal,clocks&format=table'
+GPU 0  NVIDIA GeForce RTX 5070
+  uuid           GPU-88379e65-7706-b4fb-5e78-ae338fd37ab0
+  state          P1, 59 C
+  clocks         graphics 2842/3120 MHz, sm 2842/3120 MHz, memory 13801/14001 MHz, video 2377/3090 MHz
+  throttle       none
+  fans           40%, 41%, 40%
+```
+
+**Who is talking to the driver.** That is a model serving under
+Ollama. The `tokio-runtime-w` row is yeet's own daemon: its NVML
+reads are ioctls too, and the probe does not exempt itself.
+
+```
+$ curl -s 'localhost:9480/gpu?fields=driver' | jq -r '.driver.by_process_name[] | "\(.comm)\t\(.rm_ioctls) rm ioctls\t\(.uvm_ioctls) uvm ioctls"'
+tokio-runtime-w 22457 rm ioctls     0 uvm ioctls
+ollama            567 rm ioctls   270 uvm ioctls
+nvidia-smi         52 rm ioctls     4 uvm ioctls
+```
+
+**JSON, Markdown, a stream, Prometheus.** One read, rendered however
+the caller wants it.
+
+```sh
+curl -s 'localhost:9480/gpu?fields=power,thermal&gpu=0' | jq         # JSON, one device
+curl -s 'localhost:9480/gpu?format=md'                               # Markdown; /llms.txt is the same page
+curl -sN 'localhost:9480/gpu?watch=1s&fields=utilization,clocks'     # a line of JSON per second until ctrl-c
+curl -s 'localhost:9480/metrics?fields=power,thermal'                # Prometheus, the families follow the sections
+curl -s localhost:9480/sections | jq                                 # what fields= accepts
+```
+
+**A terminal.** `yeet dial ws://localhost:9480/top`, which is what
+`make top` runs.
+
+**An agent.** The service is a Model Context Protocol server, and
+`yeet dial` is the whole client. For Claude Code:
 
 ```sh
 claude mcp add gpu-watch -- yeet dial ws://localhost:9480/mcp
@@ -91,14 +107,33 @@ From a laptop that has no yeet, over ssh to the GPU host:
 claude mcp add gpu-watch -- ssh gpu-host yeet dial ws://127.0.0.1:9480/mcp
 ```
 
-Then ask it why the training run is slow. The tools it gets are
+Then ask it why the training run is slow. Its tools are
 `gpu_snapshot(fields, gpu)`, `gpu_watch(seconds, interval_ms, gpu)`
 for a bounded window with the range each signal moved through and
 every throttle reason seen, `graph_query(query)` for anything else in
 yeet's system graph (processes, mounts, block devices, cgroups,
 network), and `graph_type(name)` to discover the schema. The resource
-`gpu://overview` is the Markdown page. `/llms.txt` is the same page
-for agents that fetch URLs.
+`gpu://overview` is the Markdown page.
+
+**What it finds.**
+
+- *A job is slow and the GPU is idle.* `utilization` low, `clocks` at
+  the floor, `driver` showing the process's ioctl rate at a trickle:
+  the GPU is waiting on the host. `graph_query` reaches the process's
+  CPU time, its open files and the block devices in the same breath.
+- *A job is slow and the GPU is busy.* `throttle` names it: a power
+  cap, a thermal slowdown, a hardware brake. `clocks` shows how far
+  below the ceiling, `power` shows draw pinned at the enforced limit.
+- *Memory is gone and nothing is running.* `processes` lists the
+  contexts NVML knows; `holders` lists everyone with the device node
+  open, which is where the notebook kernel that never released its
+  context shows up.
+- *The link is wrong.* `pcie` stuck below the slot's generation or
+  width under load is a riser or a slot; `pcie_replays_total` rising
+  is a bad cable.
+- *Something is hammering the driver.* `driver` by escape number says
+  what: a storm of `rm_control` from a process that polls, a `uvm`
+  fault rate that means the working set does not fit.
 
 ## Options
 
@@ -161,26 +196,6 @@ A value the card does not report is left out, never printed as 0.
 Per-pid kernel counters cover pids seen in the last five minutes and go
 stale with them, so the series set stays bounded on a host that runs
 many short CUDA jobs.
-
-### What it is for
-
-- **A job is slow and the GPU is idle.** `utilization` low, `clocks`
-  at the floor, `driver` showing the process's ioctl rate at a trickle:
-  the GPU is waiting on the host. `graph_query` reaches the process's
-  CPU time, its open files and the block devices in the same breath.
-- **A job is slow and the GPU is busy.** `throttle` names it: a power
-  cap, a thermal slowdown, a hardware brake. `clocks` shows how far
-  below the ceiling, `power` shows draw pinned at the enforced limit.
-- **Memory is gone and nothing is running.** `processes` lists the
-  contexts NVML knows; `holders` lists everyone with the device node
-  open, which is where the notebook kernel that never released its
-  context shows up.
-- **The link is wrong.** `pcie` stuck at a lower generation or width
-  than the slot supports under load is a riser or a slot, and
-  `pcie_replays_total` rising is a bad cable.
-- **Something is hammering the driver.** `driver` by escape number
-  says what: a storm of `rm_control` from a process that polls, a
-  `uvm` fault rate that means the working set does not fit.
 
 ## Dashboard
 

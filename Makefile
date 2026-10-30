@@ -42,13 +42,14 @@ snapshot:
 top:
 	yeet dial ws://127.0.0.1:$(PORT)/top
 
-# The pack is the runtime only: the service file, the scripts and the
-# built probe. A pack honours .gitignore, which hides the probe, so it
-# is staged without one.
+# The pack is what `yeet service import` reads: one archive with the
+# service file at the top and the scripts beside it. Only the runtime
+# goes in, the built probe included, so no toolchain is needed where
+# it is imported. Plain tar, so a release can be cut without yeet.
 pack: bpf
 	rm -rf .pack && mkdir -p .pack/lib/bpf/bin
 	cp service.toml *.js .pack/ && cp lib/*.js .pack/lib/ && cp lib/bpf/bin/gpu.bpf.o .pack/lib/bpf/bin/
-	yeet service pack .pack -y -o $(SVC).tar.gz
+	tar czf $(SVC).tar.gz -C .pack .
 	rm -rf .pack
 
 check:

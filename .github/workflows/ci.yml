@@ -18,10 +18,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: make
         run: make
+      - name: make pack
+        run: make pack
       - uses: actions/upload-artifact@v4
         with:
-          name: gpu.bpf.o
-          path: lib/bpf/bin/gpu.bpf.o
+          name: gpu-watch.tar.gz
+          path: gpu-watch.tar.gz
 
   scripts:
     name: script syntax
@@ -42,7 +44,7 @@ jobs:
       - name: getting started is intact
         run: |
           set -euo pipefail
-          for h in "## Getting started" "## Options" "## What comes out" "## Dashboard" "## Differences from" "## Read more"; do
+          for h in "## Getting started" "## Usage" "## Options" "## What comes out" "## Dashboard" "## Differences from" "## Read more"; do
             grep -q "^$h" README.md || { echo "::error::README.md is missing '$h'"; exit 1; }
           done
           grep -q "curl -fsSL https://yeet.cx | sh" README.md || { echo "::error::README.md lacks the install line"; exit 1; }
