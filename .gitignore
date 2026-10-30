@@ -12,3 +12,7 @@
 # local editor flags (make clangd)
 /.clangd
 __pycache__/
+
+# examples: local venvs and generated datasets
+/examples/*/.venv/
+/examples/*/data/

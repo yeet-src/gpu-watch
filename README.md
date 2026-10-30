@@ -115,7 +115,9 @@ yeet's system graph (processes, mounts, block devices, cgroups,
 network), and `graph_type(name)` to discover the schema. The resource
 `gpu://overview` is the Markdown page.
 
-**What it finds.**
+**What it finds.** The first of these is reproduced end to end in
+[`examples/dataloader-starvation`](examples/dataloader-starvation/README.md),
+with the numbers from a real run.
 
 - *A job is slow and the GPU is idle.* `utilization` low, `clocks` at
   the floor, `driver` showing the process's ioctl rate at a trickle:
