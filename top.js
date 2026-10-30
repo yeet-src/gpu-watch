@@ -1,5 +1,8 @@
 /* The terminal face: a live view on the tty portal, so
- * `yeet dial ws://host:9480/top` is nvidia-smi that updates in place.
+ * `yeet dial ws://host:9480/top` is nvidia-smi that updates in place
+ * and remembers. Each signal is a sparkline of the last few minutes
+ * beside its current value, so a GPU that sawtooths between busy and
+ * idle looks like a sawtooth and not like a number that flickers.
  * `--interval` and `--fields` are the unit's args in the service file.
  */
 
@@ -10,37 +13,75 @@ import { deviceRows, gib } from "./lib/formats.js";
 const args = yeet.args ?? {};
 const INTERVAL_MS = Math.max(200, Number(args.interval) || 1000);
 const SECTIONS = select(args.fields ?? "device,power,thermal,utilization,memory,clocks,pcie,processes");
+const HISTORY = 600;
+const BARS = "▁▂▃▄▅▆▇█";
 
-function bar(pct, width) {
-  const filled = Math.round((pct / 100) * width);
+// Per device, per signal, the last HISTORY samples.
+const history = new Map();
+const n = (v) => (typeof v === "bigint" ? Number(v) : v == null ? null : Number(v));
+
+function remember(d) {
+  const h = history.get(d.index) ?? new Map();
+  const push = (key, v) => {
+    if (v == null) return;
+    const arr = h.get(key) ?? [];
+    arr.push(v);
+    if (arr.length > HISTORY) arr.shift();
+    h.set(key, arr);
+  };
+  push("gpu busy", n(d.utilization_rates?.gpu));
+  push("mem busy", n(d.utilization_rates?.memory));
+  push("vram", d.memory ? (100 * n(d.memory.used)) / n(d.memory.total) : null);
+  push("sm clock", d.clocks?.sm ? (100 * n(d.clocks.sm.current)) / n(d.clocks.sm.max) : null);
+  push("power", d.power_usage != null && d.power_limits?.enforced ? (100 * n(d.power_usage)) / n(d.power_limits.enforced) : null);
+  push("temp", n(d.temperature));
+  history.set(d.index, h);
+}
+
+/* A sparkline over the last `width` samples, scaled to `max`. The
+ * colour follows the latest value so the eye lands on the right end.
+ */
+function spark(samples, width, max) {
+  const tail = samples.slice(-width);
+  const pad = " ".repeat(Math.max(0, width - tail.length));
+  const glyphs = tail.map((v) => BARS[Math.min(7, Math.max(0, Math.round((v / max) * 7)))]).join("");
+  const last = tail[tail.length - 1] ?? 0;
+  const pct = (100 * last) / max;
   const color = pct >= 90 ? style.red : pct >= 50 ? style.yellow : style.green;
-  return color("█".repeat(filled)) + style.dim("░".repeat(width - filled));
+  return pad + color(glyphs);
 }
 
 function render(r) {
   const { cols } = tty.size();
-  const w = Math.max(10, Math.min(40, cols - 30));
+  const width = Math.max(20, Math.min(100, cols - 32));
+  const span = (width * INTERVAL_MS) / 1000;
   tty.clear();
   if (r.available === false) return tty.write(style.red(`no NVIDIA devices: ${r.reason}\n`));
   for (const d of r.devices ?? []) {
-    tty.write(style.bold(style.cyan(`GPU ${d.index}  ${d.name ?? ""}`)) + "\n");
-    tty.write(style.dim("─".repeat(Math.min(cols, 60))) + "\n");
-    if (d.utilization_rates) {
-      tty.write(style.dim("gpu busy".padEnd(12)) + bar(d.utilization_rates.gpu, w) + ` ${String(d.utilization_rates.gpu).padStart(3)}%\n`);
-      tty.write(style.dim("mem busy".padEnd(12)) + bar(d.utilization_rates.memory, w) + ` ${String(d.utilization_rates.memory).padStart(3)}%\n`);
-    }
-    if (d.memory) {
-      const pct = Math.round((Number(d.memory.used) / Number(d.memory.total)) * 100);
-      tty.write(style.dim("vram".padEnd(12)) + bar(pct, w) + ` ${gib(d.memory.used)} / ${gib(d.memory.total)}\n`);
-    }
+    remember(d);
+    const h = history.get(d.index);
+    tty.write(style.bold(style.cyan(`GPU ${d.index}  ${d.name ?? ""}`)) + style.dim(`   last ${span >= 60 ? (span / 60).toFixed(1) + " min" : span.toFixed(0) + " s"}, newest at the right`) + "\n");
+    tty.write(style.dim("─".repeat(Math.min(cols, width + 32))) + "\n");
+    const row = (key, max, label) => {
+      const s = h.get(key);
+      if (!s) return;
+      tty.write(style.dim(key.padEnd(10)) + spark(s, width, max) + " " + label(s[s.length - 1]) + "\n");
+    };
+    row("gpu busy", 100, (v) => `${String(Math.round(v)).padStart(3)}%`);
+    row("mem busy", 100, (v) => `${String(Math.round(v)).padStart(3)}%`);
+    row("vram", 100, () => `${gib(d.memory.used)} / ${gib(d.memory.total)}`);
+    row("sm clock", 100, () => `${d.clocks.sm.current}/${d.clocks.sm.max} MHz`);
+    row("power", 100, () => `${(n(d.power_usage) / 1000).toFixed(0)} W / ${(n(d.power_limits.enforced) / 1000).toFixed(0)} W`);
+    row("temp", 100, (v) => `${v} C`);
+    tty.write("\n");
     for (const [label, value] of deviceRows(d)) {
-      if (["busy", "memory", "uuid"].includes(label)) continue;
+      if (["busy", "memory", "uuid", "clocks", "power"].includes(label)) continue;
       const shown = label === "throttle" && value !== "none" ? style.yellow(value) : value;
-      tty.write(style.dim(label.padEnd(12)) + shown + "\n");
+      tty.write(style.dim(label.padEnd(10)) + shown + "\n");
     }
     tty.write("\n");
   }
-  for (const wmsg of r.warnings ?? []) tty.write(style.yellow(`! ${wmsg}\n`));
+  for (const w of r.warnings ?? []) tty.write(style.yellow(`! ${w}\n`));
   tty.write(style.dim(`every ${INTERVAL_MS}ms, ${r.sampled_at}  ctrl-c to quit`) + "\n");
 }
 
