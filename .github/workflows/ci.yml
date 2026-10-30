@@ -1,0 +1,50 @@
+name: ci
+
+# Fast per-push checks; the cross-kernel verifier gate is kernel-matrix.yml.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  bpf:
+    name: build BPF object
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make
+        run: make
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpu.bpf.o
+          path: lib/bpf/bin/gpu.bpf.o
+
+  scripts:
+    name: script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: make check
+        run: make check
+
+  readme:
+    name: README
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: getting started is intact
+        run: |
+          set -euo pipefail
+          for h in "## Getting started" "## Options" "## What comes out" "## Dashboard" "## Differences from" "## Read more"; do
+            grep -q "^$h" README.md || { echo "::error::README.md is missing '$h'"; exit 1; }
+          done
+          grep -q "curl -fsSL https://yeet.cx | sh" README.md || { echo "::error::README.md lacks the install line"; exit 1; }
+          [ -f docs/dashboard.png ] && [ -f dashboard.json ] || { echo "::error::dashboard.json or docs/dashboard.png missing"; exit 1; }
+          echo ok

@@ -1,0 +1,64 @@
+alias = "gpu-watch"
+restart = "always"
+enabled = true
+working-directory = "."
+
+# Always up: owns the `http` portal and keeps the sampler worker alive.
+[units.serve]
+isolate = "./serve.js"
+args = ["--interval", "1000", "--fd-scan", "10000"]
+
+# Always up: owns the `mcp` portal.
+[units.mcp]
+isolate = "./mcp.js"
+
+# One per terminal that dials in.
+[units.top]
+isolate = "./top.js"
+lazy = true
+args = ["--interval", "1000"]
+
+[units.web]
+web-server = "http://0.0.0.0:9480/"
+
+[units.web.routes."/"]
+target = "serve"
+portal = "http"
+tenancy = "shared"
+description = "JSON of everything; ?fields= ?gpu= ?format=json|md|table ?watch=1s"
+
+[units.web.routes."/gpu"]
+target = "serve"
+portal = "http"
+tenancy = "shared"
+description = "Same as /: one read, selected with ?fields=, or NDJSON with ?watch="
+
+[units.web.routes."/metrics"]
+target = "serve"
+portal = "http"
+tenancy = "shared"
+description = "Prometheus exposition; ?fields= picks the families"
+
+[units.web.routes."/llms.txt"]
+target = "serve"
+portal = "http"
+tenancy = "shared"
+description = "Markdown overview for agents; ?fields= as above"
+
+[units.web.routes."/sections"]
+target = "serve"
+portal = "http"
+tenancy = "shared"
+description = "The section names, formats and parameters every route accepts"
+
+[units.web.routes."/mcp"]
+target = "mcp"
+portal = "mcp"
+tenancy = "shared"
+description = "MCP server, newline-delimited JSON-RPC: yeet dial ws://<host>:9480/mcp"
+
+[units.web.routes."/top"]
+target = "top"
+portal = "tty"
+tenancy = "per-connection"
+description = "Live terminal view: yeet dial ws://<host>:9480/top"

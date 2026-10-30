@@ -1,0 +1,14 @@
+# compiled BPF objects + generated CO-RE header
+/lib/bpf/bin/
+/lib/bpf/include/vmlinux.h
+
+# kernel-matrix run output
+/.kmatrix/
+
+# make pack staging and output
+/.pack/
+/gpu-watch.tar.gz
+
+# local editor flags (make clangd)
+/.clangd
+__pycache__/
