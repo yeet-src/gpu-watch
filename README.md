@@ -92,7 +92,12 @@ curl -s localhost:9480/sections | jq                                 # what fiel
 ```
 
 **A terminal.** `yeet dial ws://localhost:9480/top`, which is what
-`make top` runs.
+`make top` runs: every signal as a sparkline of the last few minutes,
+and under it the host side no GPU tool shows, each process holding a
+context with its CPU, RSS and threads, and the busiest disks. `h`
+hides and shows that host block, so a GPU that sawtooths can be
+looked at the way `nvidia-smi` shows it and then with the cause
+beside it.
 
 **An agent.** The service is a Model Context Protocol server, and
 `yeet dial` is the whole client. For Claude Code:

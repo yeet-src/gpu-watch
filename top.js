@@ -7,7 +7,7 @@
  */
 
 import { select } from "./lib/sections.js";
-import { read } from "./lib/read.js";
+import { read, readDisks } from "./lib/read.js";
 import { deviceRows, gib } from "./lib/formats.js";
 
 const args = yeet.args ?? {};
@@ -19,6 +19,49 @@ const BARS = "▁▂▃▄▅▆▇█";
 // Per device, per signal, the last HISTORY samples.
 const history = new Map();
 const n = (v) => (typeof v === "bigint" ? Number(v) : v == null ? null : Number(v));
+
+/* The host side, which no GPU tool shows beside the GPU: what each
+ * process holding a context is doing with the CPU, and whether the
+ * disks are busy. Both are rates between two ticks, so the previous
+ * counters are kept per pid and per disk.
+ */
+const lastCpu = new Map();
+const lastDisk = new Map();
+let hz = 100;
+// `h` hides and shows the host side, so a demo can show the GPU view
+// every tool has, then the same screen with the host beside it.
+let showHost = true;
+
+function cpuPercent(p, now) {
+  const s = p.process?.stat;
+  if (!s) return null;
+  const ticks = s.utime + s.stime;
+  const prev = lastCpu.get(p.pid);
+  lastCpu.set(p.pid, { ticks, now });
+  if (!prev || now === prev.now) return null;
+  return (100 * (ticks - prev.ticks)) / hz / ((now - prev.now) / 1000);
+}
+
+function diskRows(disks, now) {
+  const rows = [];
+  for (const d of disks) {
+    const prev = lastDisk.get(d.name);
+    lastDisk.set(d.name, { busy: n(d.time_in_progress), read: n(d.bytes_read), write: n(d.bytes_written), now });
+    if (!prev || now === prev.now) continue;
+    const dt = (now - prev.now) / 1000;
+    rows.push({
+      name: d.name,
+      busy: (100 * (n(d.time_in_progress) - prev.busy)) / 1000 / dt,
+      read: (n(d.bytes_read) - prev.read) / dt,
+      write: (n(d.bytes_written) - prev.write) / dt,
+      inflight: n(d.in_progress),
+    });
+  }
+  // Partitions and mappers repeat their disk; the busiest two tell the story.
+  return rows.sort((a, b) => b.busy - a.busy).slice(0, 2);
+}
+
+const mib = (b) => (b / 2 ** 20).toFixed(1) + " MiB/s";
 
 function remember(d) {
   const h = history.get(d.index) ?? new Map();
@@ -51,7 +94,9 @@ function spark(samples, width, max) {
   return pad + color(glyphs);
 }
 
-function render(r) {
+function render(r, disks) {
+  const now = Date.now();
+  hz = r.host?.ticks_per_second || hz;
   const { cols } = tty.size();
   const width = Math.max(20, Math.min(100, cols - 32));
   const span = (width * INTERVAL_MS) / 1000;
@@ -75,24 +120,52 @@ function render(r) {
     row("temp", 100, (v) => `${v} C`);
     tty.write("\n");
     for (const [label, value] of deviceRows(d)) {
-      if (["busy", "memory", "uuid", "clocks", "power"].includes(label)) continue;
+      if (["busy", "memory", "uuid", "clocks", "power", "processes"].includes(label)) continue;
       const shown = label === "throttle" && value !== "none" ? style.yellow(value) : value;
       tty.write(style.dim(label.padEnd(10)) + shown + "\n");
+    }
+    const procs = [...(d.running_compute_processes ?? []).map((p) => ({ ...p, kind: "compute" })), ...(d.running_graphics_processes ?? []).map((p) => ({ ...p, kind: "graphics" }))];
+    if (d.running_compute_processes && showHost) {
+      tty.write("\n" + style.bold("on the host") + style.dim("   what each process holding a context is doing with the CPU") + "\n");
+      if (!procs.length) tty.write(style.dim("  no process holds a context\n"));
+      for (const p of procs) {
+        const s = p.process?.stat;
+        const cpu = cpuPercent(p, now);
+        const cpuText = cpu == null ? "   -- " : `${String(Math.round(cpu)).padStart(4)}%`;
+        const cpuShown = cpu != null && cpu >= 300 ? style.yellow(cpuText) : cpuText;
+        tty.write(`  ${String(p.pid).padStart(7)}  ${(s?.comm ?? "?").padEnd(16)} cpu ${cpuShown}  rss ${s ? gib(s.rss_bytes).padStart(9) : "?"}  threads ${String(s?.num_threads ?? "?").padStart(3)}  vram ${p.used_gpu_memory == null ? "?" : gib(p.used_gpu_memory)}  ${style.dim(p.kind)}\n`);
+      }
+    }
+    tty.write("\n");
+  }
+  const rows = diskRows(disks, now);
+  if (rows.length && showHost) {
+    for (const x of rows) {
+      const busy = `${String(Math.round(x.busy)).padStart(3)}%`;
+      tty.write(style.dim("disk".padEnd(10)) + `${x.name.padEnd(10)} busy ${x.busy >= 80 ? style.yellow(busy) : busy}  read ${mib(x.read).padStart(12)}  write ${mib(x.write).padStart(12)}  in flight ${x.inflight}\n`);
     }
     tty.write("\n");
   }
   for (const w of r.warnings ?? []) tty.write(style.yellow(`! ${w}\n`));
-  tty.write(style.dim(`every ${INTERVAL_MS}ms, ${r.sampled_at}  ctrl-c to quit`) + "\n");
+  tty.write(style.dim(`every ${INTERVAL_MS}ms, ${r.sampled_at}   h: ${showHost ? "hide" : "show"} the host side   ctrl-c to quit`) + "\n");
 }
 
 async function tick() {
   try {
-    render(await read(SECTIONS));
+    const [r, disks] = await Promise.all([read(SECTIONS), readDisks().catch(() => [])]);
+    render(r, disks);
   } catch (error) {
     tty.clear();
     tty.write(style.red(`error: ${error?.message ?? error}\n`));
   }
 }
+
+tty.on("keydown", (e) => {
+  if (e.code === "h" && !e.ctrlKey) {
+    showHost = !showHost;
+    tick();
+  }
+});
 
 tty.alt(); tty.hideCursor(); tty.title("yeet gpu");
 await tick();
